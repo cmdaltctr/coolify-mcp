@@ -1,6 +1,6 @@
 {
   "name": "scheduled_tasks",
-  "description": "Manage scheduled tasks for app or service: list/create/update/delete/list_executions/run_once. list_executions: the command's stdout comes back in the execution's message field. run_once: composite that creates a throwaway \"* * * * *\" task, polls list_executions every ~5s for the first terminal execution (or until wait_seconds elapses, default 90), deletes the task, and returns status+message. WARNING: the underlying cron may fire more than once before cleanup completes — make the command idempotent (e.g. `where not exists`) or tolerate re-execution. Coolify stores `command` in a varchar(255) column and rejects longer commands with a bodyless HTTP 500 — keep commands to 255 chars or fewer (#234).",
+  "description": "Manage scheduled tasks for app or service: list/create/update/delete/list_executions/run_once. list_executions: the command's stdout comes back in the execution's message field. run_once: composite that creates a disabled throwaway task, asks current Coolify to execute it immediately, polls list_executions every ~5s for a terminal result, then deletes the task. Older Coolify versions without the execute route fall back to enabling the existing \"* * * * *\" cron flow; in fallback mode the command may fire more than once before cleanup, so make it idempotent or tolerate re-execution. Coolify stores `command` in a varchar(255) column and rejects longer commands with a bodyless HTTP 500 — keep commands to 255 chars or fewer (#234).",
   "annotations": {
     "destructiveHint": true
   },

@@ -1,6 +1,6 @@
 {
   "name": "deployment",
-  "description": "Manage deployment: get/cancel/list_for_app. Logs excluded by default on all actions — for get use `lines` (paginated tail), for list_for_app use `include_logs: true` to include raw build-log blobs.",
+  "description": "Manage deployment: get/cancel/list_for_app/rollback_images/rollback. For rollback actions uuid is the application UUID; rollback requires a commit/tag returned by rollback_images. Logs are excluded by default — for get use lines (paginated tail), for list_for_app use include_logs=true.",
   "annotations": {
     "destructiveHint": true
   },
@@ -12,10 +12,16 @@
         "enum": [
           "get",
           "cancel",
-          "list_for_app"
+          "list_for_app",
+          "rollback_images",
+          "rollback"
         ]
       },
       "uuid": {
+        "type": "string"
+      },
+      "commit": {
+        "description": "rollback only: image commit/tag from rollback_images",
         "type": "string"
       },
       "lines": {

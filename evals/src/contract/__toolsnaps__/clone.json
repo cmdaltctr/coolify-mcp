@@ -1,0 +1,42 @@
+{
+  "name": "clone",
+  "description": "Clone an existing application, database, or service into a Coolify destination. Volume data is not copied unless clone_volumes=true. Returns the new UUID and a compact resource projection with next actions.",
+  "annotations": {
+    "destructiveHint": true
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "resource": {
+        "type": "string",
+        "enum": [
+          "application",
+          "database",
+          "service"
+        ]
+      },
+      "uuid": {
+        "type": "string",
+        "description": "UUID of the source resource"
+      },
+      "destination_uuid": {
+        "type": "string",
+        "description": "Destination UUID for the clone"
+      },
+      "name": {
+        "description": "Optional name for the cloned resource",
+        "type": "string"
+      },
+      "clone_volumes": {
+        "description": "Copy persistent volume data (default false; may briefly stop the source)",
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "resource",
+      "uuid",
+      "destination_uuid"
+    ],
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  }
+}

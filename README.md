@@ -7,7 +7,7 @@
 [![MCP Registry](https://img.shields.io/badge/MCP%20Registry-io.github.StuMason%2Fcoolify-blue)](https://registry.modelcontextprotocol.io)
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 
-Manage [Coolify](https://coolify.io/) from Claude, Cursor, or any MCP client: 44 consolidated tools for deploying, debugging, and operating your self-hosted PaaS in plain English.
+Manage [Coolify](https://coolify.io/) from Claude, Cursor, or any MCP client: 47 consolidated tools for deploying, debugging, and operating your self-hosted PaaS in plain English.
 
 📖 **[coolify-mcp.stumason.dev](https://coolify-mcp.stumason.dev)**: what it does, how to install it, and why it is safe to point at production.
 
@@ -19,13 +19,37 @@ You need a running Coolify v4 instance and an API token (Coolify → Settings �
 
 **Claude Desktop, one-click:** download [`coolify-mcp.mcpb`](https://github.com/StuMason/coolify-mcp/releases/latest/download/coolify-mcp.mcpb) and drag it into **Settings → Extensions**. You'll be prompted for your Coolify URL and token. No Node install, no JSON editing.
 
+**From a local clone** (build first, then point your client at `dist/index.js`):
+
+```bash
+git clone https://github.com/cmdaltctr/coolify-mcp.git
+cd coolify-mcp && npm install && npm run build
+```
+
 **Claude Code:**
 
 ```bash
 claude mcp add coolify \
   -e COOLIFY_BASE_URL="https://your-coolify-instance.com" \
   -e COOLIFY_ACCESS_TOKEN="your-api-token" \
-  -- npx @masonator/coolify-mcp@latest
+  -- node /absolute/path/to/coolify-mcp/dist/index.js
+```
+
+**OpenCode** (add to `opencode.json` in your project root or `~/.config/opencode/.opencode/opencode.json`):
+
+```json
+{
+  "mcp": {
+    "coolify": {
+      "type": "local",
+      "command": ["node", "/absolute/path/to/coolify-mcp/dist/index.js"],
+      "environment": {
+        "COOLIFY_BASE_URL": "https://your-coolify-instance.com",
+        "COOLIFY_ACCESS_TOKEN": "your-api-token"
+      }
+    }
+  }
+}
 ```
 
 **Any MCP client (JSON config):**
@@ -34,8 +58,8 @@ claude mcp add coolify \
 {
   "mcpServers": {
     "coolify": {
-      "command": "npx",
-      "args": ["-y", "@masonator/coolify-mcp"],
+      "command": "node",
+      "args": ["/absolute/path/to/coolify-mcp/dist/index.js"],
       "env": {
         "COOLIFY_BASE_URL": "https://your-coolify-instance.com",
         "COOLIFY_ACCESS_TOKEN": "your-api-token"
@@ -44,6 +68,8 @@ claude mcp add coolify \
   }
 }
 ```
+
+Prefer the published package instead? Replace the `node /absolute/path/to/coolify-mcp/dist/index.js` command with `npx -y @masonator/coolify-mcp@latest` (or `npx` + `["-y", "@masonator/coolify-mcp"]` for JSON configs) and drop the build step.
 
 Behind Cloudflare Access or an auth proxy? Add `--header "Key: Value"` args (repeatable). The same config works in Cursor, Claude Code and any other MCP client, and can be repeated for multiple Coolify instances.
 
@@ -55,18 +81,20 @@ Behind Cloudflare Access or an auth proxy? Add `--header "Key: Value"` args (rep
 | **Diagnostics**      | `diagnose_app`, `diagnose_server`, `find_issues`                                                                                                                          |
 | **Batch Operations** | `restart_project_apps`, `bulk_env_update`, `stop_all_apps`, `redeploy_project`                                                                                            |
 | **Servers**          | `list_servers`, `get_server`, `validate_server`, `server_resources`, `server_domains`                                                                                     |
+| **Destinations**     | `destinations` (list, get, create, update, delete Docker destinations)                                                                                                    |
 | **Projects**         | `projects` (list, get, create, update, delete via action param)                                                                                                           |
 | **Environments**     | `environments` (list, get, create, delete via action param)                                                                                                               |
 | **Applications**     | `list_applications`, `get_application`, `application` (CRUD + delete_preview)                                                                                             |
 | **Databases**        | `list_databases`, `get_database`, `database` (create 8 types, delete), `database_backups` (CRUD schedules, executions incl. delete)                                       |
 | **Services**         | `list_services`, `get_service`, `service` (create, update, delete, list_containers; per-container `update_application` + `start/stop/restart_application`, Coolify v4.2+) |
+| **Resource cloning** | `clone` (application, database, service; optional persistent-volume copy)                                                                                                 |
 | **Control**          | `control` (start/stop/restart for apps, databases, services)                                                                                                              |
 | **Logs**             | `logs` (container logs for app, database, service; services need `container`), `application_logs` (superseded by `logs`)                                                  |
 | **Tags**             | `tags` (list, attach, detach for apps, databases, services; tag resources then `deploy` them together; Coolify v4.2+)                                                     |
-| **Env Vars**         | `env_vars` (CRUD + bulk_update for application, service, and database env vars)                                                                                           |
+| **Env Vars**         | `env_vars` (resource CRUD + bulk_update), `shared_env` (team, project, environment, and server CRUD)                                                                      |
 | **Storages**         | `storages` (list, create, update, delete persistent/file storages for apps, databases, services)                                                                          |
-| **Scheduled Tasks**  | `scheduled_tasks` (list, create, update, delete, list_executions, run_once for apps and services)                                                                         |
-| **Deployments**      | `list_deployments`, `deploy` (incl. wait-to-terminal-status), `deployment` (get, cancel, list_for_app)                                                                    |
+| **Scheduled Tasks**  | `scheduled_tasks` (list, create, update, delete, list_executions, deterministic run_once for apps and services)                                                           |
+| **Deployments**      | `list_deployments`, `deploy` (incl. wait-to-terminal-status), `deployment` (get, cancel, list_for_app, rollback_images, rollback)                                         |
 | **Private Keys**     | `private_keys` (list, get, create, update, delete via action param)                                                                                                       |
 | **GitHub Apps**      | `github_apps` (list, get, create, update, delete, list_repos, list_branches)                                                                                              |
 | **Teams**            | `teams` (list, get, get_members, get_current, get_current_members)                                                                                                        |
@@ -111,6 +139,7 @@ Set `COOLIFY_MCP_ELICITATION=off` to turn the confirmations off entirely. It exi
 Secrets are masked at the API boundary. A client granted "list" access never sees plaintext credentials unless you explicitly opt in with `reveal: true`:
 
 - **`env_vars`**: variable values return as `***`
+- **`shared_env`**: inherited variable values use the same masking and explicit `reveal: true` opt-in; Coolify still requires the token's `sensitive-read` permission to return plaintext
 - **`system list_resources` (full mode)**: webhook HMAC secrets, basic-auth and database passwords, `internal/external_db_url` connection strings, compose bodies, Traefik labels, nested env vars
 - **`get_database` / `get_service`**: the same credential fields are masked on the detail endpoints, and any embedded server row is projected down to uuid/name/ip so its sentinel token and log-drain config never leave the client
 - **`get_server`**: sentinel and log-drain credentials are always masked, with no reveal
@@ -130,6 +159,8 @@ Works against Coolify v4.0 through v4.2+. Two v4.2 changes are worth knowing abo
 
 State-changing endpoints also moved from GET to POST in v4.2. The client handles this for you across both eras, so no action is needed.
 
+`scheduled_tasks(action="run_once")` uses Coolify's native execute-now endpoint when it exists. If an older Coolify build has no such route, it retains the previous temporary-cron implementation as a compatibility fallback; the public MCP call is unchanged.
+
 ## Example prompts
 
 ```text
@@ -138,6 +169,9 @@ Diagnose my stuartmason.co.uk app
 Find any issues in my infrastructure
 Deploy application {uuid} and wait for it to finish
 Update the DATABASE_URL env var for application {uuid}
+Clone application {uuid} into destination {destination_uuid}
+List project-level shared configuration for project {uuid}
+Show rollback images for application {uuid}, then roll back to {commit}
 Create a staging environment in project {uuid}
 Restart all applications in project {uuid}
 How do I fix a 502 Bad Gateway error in Coolify?

@@ -9,6 +9,18 @@ import type {
   DeleteOptions,
   MessageResponse,
   UuidResponse,
+  CloneResourceRequest,
+  CloneResourceResponse,
+  RollbackImagesResponse,
+  RollbackApplicationRequest,
+  RollbackApplicationResponse,
+  SharedEnvironmentVariable,
+  CreateSharedEnvRequest,
+  UpdateSharedEnvRequest,
+  CreateSharedEnvResponse,
+  Destination,
+  CreateDestinationRequest,
+  UpdateDestinationRequest,
   // Server types
   Server,
   ServerResource,
@@ -274,7 +286,7 @@ export class CoolifyApiError extends Error {
  * method/path is not routed" from "the resource does not exist", which matters
  * because only the former is safe and useful to retry with a different method.
  */
-function isRoutingCatchAll(error: CoolifyApiError): boolean {
+export function isRoutingCatchAll(error: CoolifyApiError): boolean {
   if (error.status !== 404) return false;
   const body = error.body;
   if (typeof body !== 'object' || body === null) return false;
@@ -531,6 +543,14 @@ function maskEnvVar(envVar: EnvironmentVariable): EnvironmentVariable {
     masked.real_value = MASKED_VALUE;
   }
   return masked;
+}
+
+/** Mask a shared variable's value unless the caller explicitly opts in. */
+function maskSharedEnvVar(envVar: SharedEnvironmentVariable): SharedEnvironmentVariable {
+  return {
+    ...envVar,
+    value: MASKED_VALUE,
+  };
 }
 
 /**
@@ -991,6 +1011,42 @@ export class CoolifyClient {
       LEGACY_GET_ENDPOINTS.serversValidate,
       `/servers/${uuid}/validate`,
     );
+  }
+
+  // ===========================================================================
+  // Docker Destination endpoints
+  // ===========================================================================
+
+  async listDestinations(serverUuid?: string): Promise<Destination[]> {
+    if (serverUuid) {
+      return this.request<Destination[]>(`/servers/${serverUuid}/destinations`);
+    }
+    return this.request<Destination[]>('/destinations');
+  }
+
+  async getDestination(uuid: string): Promise<Destination> {
+    return this.request<Destination>(`/destinations/${uuid}`);
+  }
+
+  async createDestination(
+    serverUuid: string,
+    data: CreateDestinationRequest,
+  ): Promise<Destination> {
+    return this.request<Destination>(`/servers/${serverUuid}/destinations`, {
+      method: 'POST',
+      body: JSON.stringify(cleanRequestData(data)),
+    });
+  }
+
+  async updateDestination(uuid: string, data: UpdateDestinationRequest): Promise<Destination> {
+    return this.request<Destination>(`/destinations/${uuid}`, {
+      method: 'PATCH',
+      body: JSON.stringify(data),
+    });
+  }
+
+  async deleteDestination(uuid: string): Promise<MessageResponse> {
+    return this.request<MessageResponse>(`/destinations/${uuid}`, { method: 'DELETE' });
   }
 
   // ===========================================================================
@@ -1710,6 +1766,31 @@ export class CoolifyClient {
   }
 
   // ===========================================================================
+  // Resource Clone endpoints
+  // ===========================================================================
+
+  async cloneApplication(uuid: string, data: CloneResourceRequest): Promise<CloneResourceResponse> {
+    return this.request<CloneResourceResponse>(`/applications/${uuid}/clone`, {
+      method: 'POST',
+      body: JSON.stringify(cleanRequestData(data)),
+    });
+  }
+
+  async cloneDatabase(uuid: string, data: CloneResourceRequest): Promise<CloneResourceResponse> {
+    return this.request<CloneResourceResponse>(`/databases/${uuid}/clone`, {
+      method: 'POST',
+      body: JSON.stringify(cleanRequestData(data)),
+    });
+  }
+
+  async cloneService(uuid: string, data: CloneResourceRequest): Promise<CloneResourceResponse> {
+    return this.request<CloneResourceResponse>(`/services/${uuid}/clone`, {
+      method: 'POST',
+      body: JSON.stringify(cleanRequestData(data)),
+    });
+  }
+
+  // ===========================================================================
   // Deployment endpoints
   // ===========================================================================
 
@@ -1784,6 +1865,20 @@ export class CoolifyClient {
     };
   }
 
+  async listApplicationRollbackImages(uuid: string): Promise<RollbackImagesResponse> {
+    return this.request<RollbackImagesResponse>(`/applications/${uuid}/rollback-images`);
+  }
+
+  async rollbackApplication(
+    uuid: string,
+    data: RollbackApplicationRequest,
+  ): Promise<RollbackApplicationResponse> {
+    return this.request<RollbackApplicationResponse>(`/applications/${uuid}/rollback`, {
+      method: 'POST',
+      body: JSON.stringify(data),
+    });
+  }
+
   // ===========================================================================
   // Team endpoints
   // ===========================================================================
@@ -1806,6 +1901,175 @@ export class CoolifyClient {
 
   async getCurrentTeamMembers(): Promise<TeamMember[]> {
     return this.request<TeamMember[]>('/teams/current/members');
+  }
+
+  // ===========================================================================
+  // Shared Environment Variable endpoints
+  // ===========================================================================
+
+  async listTeamSharedEnvVars(options?: {
+    reveal?: boolean;
+  }): Promise<SharedEnvironmentVariable[]> {
+    const envVars = await this.request<SharedEnvironmentVariable[]>('/team/envs');
+    return options?.reveal === true ? envVars : envVars.map(maskSharedEnvVar);
+  }
+
+  async createTeamSharedEnvVar(data: CreateSharedEnvRequest): Promise<CreateSharedEnvResponse> {
+    return this.request<CreateSharedEnvResponse>('/team/envs', {
+      method: 'POST',
+      body: JSON.stringify(cleanRequestData(data)),
+    });
+  }
+
+  async updateTeamSharedEnvVar(
+    envId: number,
+    data: UpdateSharedEnvRequest,
+    options?: { reveal?: boolean },
+  ): Promise<SharedEnvironmentVariable> {
+    const envVar = await this.request<SharedEnvironmentVariable>(`/team/envs/${envId}`, {
+      method: 'PATCH',
+      body: JSON.stringify(cleanRequestData(data)),
+    });
+    return options?.reveal === true ? envVar : maskSharedEnvVar(envVar);
+  }
+
+  async deleteTeamSharedEnvVar(envId: number): Promise<MessageResponse> {
+    return this.request<MessageResponse>(`/team/envs/${envId}`, { method: 'DELETE' });
+  }
+
+  async listProjectSharedEnvVars(
+    projectUuid: string,
+    options?: { reveal?: boolean },
+  ): Promise<SharedEnvironmentVariable[]> {
+    const envVars = await this.request<SharedEnvironmentVariable[]>(
+      `/projects/${projectUuid}/envs`,
+    );
+    return options?.reveal === true ? envVars : envVars.map(maskSharedEnvVar);
+  }
+
+  async createProjectSharedEnvVar(
+    projectUuid: string,
+    data: CreateSharedEnvRequest,
+  ): Promise<CreateSharedEnvResponse> {
+    return this.request<CreateSharedEnvResponse>(`/projects/${projectUuid}/envs`, {
+      method: 'POST',
+      body: JSON.stringify(cleanRequestData(data)),
+    });
+  }
+
+  async updateProjectSharedEnvVar(
+    projectUuid: string,
+    envId: number,
+    data: UpdateSharedEnvRequest,
+    options?: { reveal?: boolean },
+  ): Promise<SharedEnvironmentVariable> {
+    const envVar = await this.request<SharedEnvironmentVariable>(
+      `/projects/${projectUuid}/envs/${envId}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(cleanRequestData(data)),
+      },
+    );
+    return options?.reveal === true ? envVar : maskSharedEnvVar(envVar);
+  }
+
+  async deleteProjectSharedEnvVar(projectUuid: string, envId: number): Promise<MessageResponse> {
+    return this.request<MessageResponse>(`/projects/${projectUuid}/envs/${envId}`, {
+      method: 'DELETE',
+    });
+  }
+
+  async listEnvironmentSharedEnvVars(
+    projectUuid: string,
+    environmentNameOrUuid: string,
+    options?: { reveal?: boolean },
+  ): Promise<SharedEnvironmentVariable[]> {
+    const envVars = await this.request<SharedEnvironmentVariable[]>(
+      `/projects/${projectUuid}/environments/${environmentNameOrUuid}/envs`,
+    );
+    return options?.reveal === true ? envVars : envVars.map(maskSharedEnvVar);
+  }
+
+  async createEnvironmentSharedEnvVar(
+    projectUuid: string,
+    environmentNameOrUuid: string,
+    data: CreateSharedEnvRequest,
+  ): Promise<CreateSharedEnvResponse> {
+    return this.request<CreateSharedEnvResponse>(
+      `/projects/${projectUuid}/environments/${environmentNameOrUuid}/envs`,
+      {
+        method: 'POST',
+        body: JSON.stringify(cleanRequestData(data)),
+      },
+    );
+  }
+
+  async updateEnvironmentSharedEnvVar(
+    projectUuid: string,
+    environmentNameOrUuid: string,
+    envId: number,
+    data: UpdateSharedEnvRequest,
+    options?: { reveal?: boolean },
+  ): Promise<SharedEnvironmentVariable> {
+    const envVar = await this.request<SharedEnvironmentVariable>(
+      `/projects/${projectUuid}/environments/${environmentNameOrUuid}/envs/${envId}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(cleanRequestData(data)),
+      },
+    );
+    return options?.reveal === true ? envVar : maskSharedEnvVar(envVar);
+  }
+
+  async deleteEnvironmentSharedEnvVar(
+    projectUuid: string,
+    environmentNameOrUuid: string,
+    envId: number,
+  ): Promise<MessageResponse> {
+    return this.request<MessageResponse>(
+      `/projects/${projectUuid}/environments/${environmentNameOrUuid}/envs/${envId}`,
+      { method: 'DELETE' },
+    );
+  }
+
+  async listServerSharedEnvVars(
+    serverUuid: string,
+    options?: { reveal?: boolean },
+  ): Promise<SharedEnvironmentVariable[]> {
+    const envVars = await this.request<SharedEnvironmentVariable[]>(`/servers/${serverUuid}/envs`);
+    return options?.reveal === true ? envVars : envVars.map(maskSharedEnvVar);
+  }
+
+  async createServerSharedEnvVar(
+    serverUuid: string,
+    data: CreateSharedEnvRequest,
+  ): Promise<CreateSharedEnvResponse> {
+    return this.request<CreateSharedEnvResponse>(`/servers/${serverUuid}/envs`, {
+      method: 'POST',
+      body: JSON.stringify(cleanRequestData(data)),
+    });
+  }
+
+  async updateServerSharedEnvVar(
+    serverUuid: string,
+    envId: number,
+    data: UpdateSharedEnvRequest,
+    options?: { reveal?: boolean },
+  ): Promise<SharedEnvironmentVariable> {
+    const envVar = await this.request<SharedEnvironmentVariable>(
+      `/servers/${serverUuid}/envs/${envId}`,
+      {
+        method: 'PATCH',
+        body: JSON.stringify(cleanRequestData(data)),
+      },
+    );
+    return options?.reveal === true ? envVar : maskSharedEnvVar(envVar);
+  }
+
+  async deleteServerSharedEnvVar(serverUuid: string, envId: number): Promise<MessageResponse> {
+    return this.request<MessageResponse>(`/servers/${serverUuid}/envs/${envId}`, {
+      method: 'DELETE',
+    });
   }
 
   // ===========================================================================
@@ -2043,6 +2307,13 @@ export class CoolifyClient {
     );
   }
 
+  async executeApplicationScheduledTask(uuid: string, taskUuid: string): Promise<MessageResponse> {
+    return this.request<MessageResponse>(
+      `/applications/${uuid}/scheduled-tasks/${taskUuid}/execute`,
+      { method: 'POST' },
+    );
+  }
+
   // ===========================================================================
   // Application Preview endpoints
   // ===========================================================================
@@ -2231,6 +2502,12 @@ export class CoolifyClient {
     return this.request<ScheduledTaskExecution[]>(
       `/services/${uuid}/scheduled-tasks/${taskUuid}/executions`,
     );
+  }
+
+  async executeServiceScheduledTask(uuid: string, taskUuid: string): Promise<MessageResponse> {
+    return this.request<MessageResponse>(`/services/${uuid}/scheduled-tasks/${taskUuid}/execute`, {
+      method: 'POST',
+    });
   }
 
   // ===========================================================================

@@ -1,0 +1,48 @@
+{
+  "name": "destinations",
+  "description": "Manage Coolify Docker network destinations: list/get/create/update/delete. list may be narrowed to one server; create is always server-scoped. This is destination placement support, not a generic networking subsystem.",
+  "annotations": {
+    "destructiveHint": true
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "action": {
+        "type": "string",
+        "enum": [
+          "list",
+          "get",
+          "create",
+          "update",
+          "delete"
+        ]
+      },
+      "uuid": {
+        "type": "string"
+      },
+      "server_uuid": {
+        "type": "string"
+      },
+      "name": {
+        "type": "string",
+        "maxLength": 255
+      },
+      "network": {
+        "type": "string",
+        "maxLength": 255,
+        "pattern": "^[a-zA-Z0-9][a-zA-Z0-9._-]*$"
+      },
+      "type": {
+        "type": "string",
+        "enum": [
+          "standalone",
+          "swarm"
+        ]
+      }
+    },
+    "required": [
+      "action"
+    ],
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  }
+}
