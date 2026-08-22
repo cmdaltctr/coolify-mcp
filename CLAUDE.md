@@ -181,6 +181,6 @@ When making changes to the codebase, ensure documentation is updated:
    - New example prompts needed
    - Response size improvements made (update comparison table)
 
-3. **This file (CLAUDE.md)** - Update tool count if changed (currently 44 tools)
+3. **This file (CLAUDE.md)** - Update tool count if changed (currently 47 tools)
 
 Always work on a feature branch and include documentation updates in the same PR as code changes.

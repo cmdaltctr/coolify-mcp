@@ -39,6 +39,31 @@ export interface UuidResponse {
   uuid: string;
 }
 
+export type CloneResource = 'application' | 'database' | 'service';
+
+export interface CloneResourceRequest {
+  destination_uuid: string;
+  name?: string;
+  clone_volumes?: boolean;
+}
+
+export interface CloneResourceResponse extends UuidResponse {
+  message?: string;
+}
+
+export interface ClonedResourceSummary {
+  uuid: string;
+  name: string;
+  resource: CloneResource;
+  destination_uuid: string;
+  project_uuid?: string;
+  environment_id?: number;
+  environment_uuid?: string;
+  environment_name?: string;
+  message?: string;
+  lookup_warning?: string;
+}
+
 // =============================================================================
 // Server Types
 // =============================================================================
@@ -1001,6 +1026,86 @@ export interface DeployTriggerResponse {
     resource_uuid?: string;
     deployment_uuid?: string;
   }>;
+}
+
+export interface RollbackImage {
+  tag: string;
+  created_at: string;
+  is_current: boolean;
+}
+
+export interface RollbackImagesResponse {
+  current: string | null;
+  images: RollbackImage[];
+}
+
+export interface RollbackApplicationRequest {
+  commit: string;
+}
+
+export interface RollbackApplicationResponse extends MessageResponse {
+  deployment_uuid: string;
+}
+
+// =============================================================================
+// Shared Environment Variable Types
+// =============================================================================
+
+export type SharedEnvScope = 'team' | 'project' | 'environment' | 'server';
+
+export interface SharedEnvironmentVariable {
+  id: number;
+  key: string;
+  /** Undefined when Coolify withholds the value without sensitive-read permission. */
+  value?: string | null;
+  is_literal: boolean;
+  is_multiline: boolean;
+  is_shown_once: boolean;
+  comment?: string | null;
+  type?: SharedEnvScope;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface CreateSharedEnvRequest {
+  key: string;
+  value?: string | null;
+  is_literal?: boolean;
+  is_multiline?: boolean;
+  is_shown_once?: boolean;
+  comment?: string | null;
+}
+
+export type UpdateSharedEnvRequest = Partial<CreateSharedEnvRequest>;
+
+export interface CreateSharedEnvResponse {
+  id: number;
+}
+
+// =============================================================================
+// Destination Types
+// =============================================================================
+
+export type DestinationType = 'standalone' | 'swarm';
+
+export interface Destination {
+  uuid: string;
+  name: string;
+  network: string;
+  type: DestinationType;
+  server_uuid?: string;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface CreateDestinationRequest {
+  network: string;
+  name?: string;
+  type?: DestinationType;
+}
+
+export interface UpdateDestinationRequest {
+  name: string;
 }
 
 // =============================================================================

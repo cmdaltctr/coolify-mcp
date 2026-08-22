@@ -6915,3 +6915,237 @@ describe('errorHint', () => {
     expect(errorHint(404, '/health')).toBeUndefined();
   });
 });
+
+describe('CoolifyClient dev-agent enablement endpoints', () => {
+  let client: CoolifyClient;
+
+  const sharedEnv = {
+    id: 7,
+    key: 'API_TOKEN',
+    value: 'secret',
+    is_literal: false,
+    is_multiline: false,
+    is_shown_once: false,
+  };
+
+  beforeEach(() => {
+    mockFetch.mockClear();
+    global.fetch = mockFetch;
+    client = new CoolifyClient({
+      baseUrl: 'http://localhost:3000',
+      accessToken: 'test-api-key',
+    });
+  });
+
+  it('clones applications, databases, and services through their native POST routes', async () => {
+    mockFetch
+      .mockResolvedValueOnce(
+        mockResponse({ uuid: 'new-app', message: 'Application cloned.' }, true, 201),
+      )
+      .mockResolvedValueOnce(
+        mockResponse({ uuid: 'new-db', message: 'Database cloned.' }, true, 201),
+      )
+      .mockResolvedValueOnce(
+        mockResponse({ uuid: 'new-svc', message: 'Service cloned.' }, true, 201),
+      );
+
+    const data = { destination_uuid: 'dest-uuid', name: 'preview', clone_volumes: false };
+    await client.cloneApplication('app-uuid', data);
+    await client.cloneDatabase('db-uuid', data);
+    await client.cloneService('svc-uuid', data);
+
+    for (const [index, path] of [
+      '/applications/app-uuid/clone',
+      '/databases/db-uuid/clone',
+      '/services/svc-uuid/clone',
+    ].entries()) {
+      expect(mockFetch).toHaveBeenNthCalledWith(
+        index + 1,
+        `http://localhost:3000/api/v1${path}`,
+        expect.objectContaining({ method: 'POST', body: JSON.stringify(data) }),
+      );
+    }
+  });
+
+  it('surfaces clone validation failures', async () => {
+    mockFetch.mockResolvedValueOnce(
+      mockResponse(
+        { message: 'Validation failed.', errors: { destination_uuid: ['required'] } },
+        false,
+        422,
+      ),
+    );
+
+    await expect(client.cloneApplication('app-uuid', { destination_uuid: '' })).rejects.toThrow(
+      /Validation failed/,
+    );
+  });
+
+  it('lists rollback images and queues an application rollback', async () => {
+    mockFetch
+      .mockResolvedValueOnce(
+        mockResponse({
+          current: 'new-commit',
+          images: [{ tag: 'old-commit', created_at: '2026-08-01', is_current: false }],
+        }),
+      )
+      .mockResolvedValueOnce(
+        mockResponse({ message: 'Rollback queued.', deployment_uuid: 'dep-uuid' }),
+      );
+
+    await client.listApplicationRollbackImages('app-uuid');
+    await client.rollbackApplication('app-uuid', { commit: 'old-commit' });
+
+    expect(mockFetch).toHaveBeenNthCalledWith(
+      1,
+      'http://localhost:3000/api/v1/applications/app-uuid/rollback-images',
+      expect.any(Object),
+    );
+    expect(mockFetch).toHaveBeenNthCalledWith(
+      2,
+      'http://localhost:3000/api/v1/applications/app-uuid/rollback',
+      expect.objectContaining({ method: 'POST', body: JSON.stringify({ commit: 'old-commit' }) }),
+    );
+  });
+
+  it('manages team shared variables and masks values by default', async () => {
+    mockFetch
+      .mockResolvedValueOnce(mockResponse([sharedEnv]))
+      .mockResolvedValueOnce(mockResponse({ id: 7 }, true, 201))
+      .mockResolvedValueOnce(mockResponse(sharedEnv))
+      .mockResolvedValueOnce(mockResponse({ message: 'deleted' }));
+
+    expect((await client.listTeamSharedEnvVars())[0]?.value).toBe('***');
+    await client.createTeamSharedEnvVar({ key: 'API_TOKEN', value: 'secret' });
+    expect((await client.updateTeamSharedEnvVar(7, { comment: 'shared' })).value).toBe('***');
+    await client.deleteTeamSharedEnvVar(7);
+
+    expect(mockFetch.mock.calls.map(([url, init]) => [url, init?.method ?? 'GET'])).toEqual([
+      ['http://localhost:3000/api/v1/team/envs', 'GET'],
+      ['http://localhost:3000/api/v1/team/envs', 'POST'],
+      ['http://localhost:3000/api/v1/team/envs/7', 'PATCH'],
+      ['http://localhost:3000/api/v1/team/envs/7', 'DELETE'],
+    ]);
+  });
+
+  it('manages project shared variables through scoped routes', async () => {
+    mockFetch
+      .mockResolvedValueOnce(mockResponse([sharedEnv]))
+      .mockResolvedValueOnce(mockResponse({ id: 7 }, true, 201))
+      .mockResolvedValueOnce(mockResponse(sharedEnv))
+      .mockResolvedValueOnce(mockResponse({ message: 'deleted' }));
+
+    await client.listProjectSharedEnvVars('project-uuid');
+    await client.createProjectSharedEnvVar('project-uuid', { key: 'API_TOKEN' });
+    await client.updateProjectSharedEnvVar('project-uuid', 7, { value: 'rotated' });
+    await client.deleteProjectSharedEnvVar('project-uuid', 7);
+
+    expect(mockFetch.mock.calls.map(([url, init]) => [url, init?.method ?? 'GET'])).toEqual([
+      ['http://localhost:3000/api/v1/projects/project-uuid/envs', 'GET'],
+      ['http://localhost:3000/api/v1/projects/project-uuid/envs', 'POST'],
+      ['http://localhost:3000/api/v1/projects/project-uuid/envs/7', 'PATCH'],
+      ['http://localhost:3000/api/v1/projects/project-uuid/envs/7', 'DELETE'],
+    ]);
+  });
+
+  it('manages environment shared variables through project/environment routes', async () => {
+    mockFetch
+      .mockResolvedValueOnce(mockResponse([sharedEnv]))
+      .mockResolvedValueOnce(mockResponse({ id: 7 }, true, 201))
+      .mockResolvedValueOnce(mockResponse(sharedEnv))
+      .mockResolvedValueOnce(mockResponse({ message: 'deleted' }));
+
+    await client.listEnvironmentSharedEnvVars('project-uuid', 'preview');
+    await client.createEnvironmentSharedEnvVar('project-uuid', 'preview', { key: 'API_TOKEN' });
+    await client.updateEnvironmentSharedEnvVar('project-uuid', 'preview', 7, { value: 'rotated' });
+    await client.deleteEnvironmentSharedEnvVar('project-uuid', 'preview', 7);
+
+    expect(mockFetch.mock.calls.map(([url, init]) => [url, init?.method ?? 'GET'])).toEqual([
+      ['http://localhost:3000/api/v1/projects/project-uuid/environments/preview/envs', 'GET'],
+      ['http://localhost:3000/api/v1/projects/project-uuid/environments/preview/envs', 'POST'],
+      ['http://localhost:3000/api/v1/projects/project-uuid/environments/preview/envs/7', 'PATCH'],
+      ['http://localhost:3000/api/v1/projects/project-uuid/environments/preview/envs/7', 'DELETE'],
+    ]);
+  });
+
+  it('manages server shared variables and honours reveal=true', async () => {
+    mockFetch
+      .mockResolvedValueOnce(mockResponse([sharedEnv]))
+      .mockResolvedValueOnce(mockResponse({ id: 7 }, true, 201))
+      .mockResolvedValueOnce(mockResponse(sharedEnv))
+      .mockResolvedValueOnce(mockResponse({ message: 'deleted' }));
+
+    expect((await client.listServerSharedEnvVars('server-uuid', { reveal: true }))[0]?.value).toBe(
+      'secret',
+    );
+    await client.createServerSharedEnvVar('server-uuid', { key: 'API_TOKEN' });
+    expect(
+      (
+        await client.updateServerSharedEnvVar(
+          'server-uuid',
+          7,
+          { value: 'rotated' },
+          { reveal: true },
+        )
+      ).value,
+    ).toBe('secret');
+    await client.deleteServerSharedEnvVar('server-uuid', 7);
+
+    expect(mockFetch.mock.calls.map(([url, init]) => [url, init?.method ?? 'GET'])).toEqual([
+      ['http://localhost:3000/api/v1/servers/server-uuid/envs', 'GET'],
+      ['http://localhost:3000/api/v1/servers/server-uuid/envs', 'POST'],
+      ['http://localhost:3000/api/v1/servers/server-uuid/envs/7', 'PATCH'],
+      ['http://localhost:3000/api/v1/servers/server-uuid/envs/7', 'DELETE'],
+    ]);
+  });
+
+  it('manages Docker destinations through verified CRUD routes', async () => {
+    const destination = {
+      uuid: 'dest-uuid',
+      name: 'preview',
+      network: 'preview-net',
+      type: 'standalone' as const,
+      server_uuid: 'server-uuid',
+    };
+    mockFetch
+      .mockResolvedValueOnce(mockResponse([destination]))
+      .mockResolvedValueOnce(mockResponse(destination))
+      .mockResolvedValueOnce(mockResponse(destination, true, 201))
+      .mockResolvedValueOnce(mockResponse({ ...destination, name: 'renamed' }))
+      .mockResolvedValueOnce(mockResponse({ message: 'deleted' }));
+
+    await client.listDestinations('server-uuid');
+    await client.getDestination('dest-uuid');
+    await client.createDestination('server-uuid', { network: 'preview-net', name: 'preview' });
+    await client.updateDestination('dest-uuid', { name: 'renamed' });
+    await client.deleteDestination('dest-uuid');
+
+    expect(mockFetch.mock.calls.map(([url, init]) => [url, init?.method ?? 'GET'])).toEqual([
+      ['http://localhost:3000/api/v1/servers/server-uuid/destinations', 'GET'],
+      ['http://localhost:3000/api/v1/destinations/dest-uuid', 'GET'],
+      ['http://localhost:3000/api/v1/servers/server-uuid/destinations', 'POST'],
+      ['http://localhost:3000/api/v1/destinations/dest-uuid', 'PATCH'],
+      ['http://localhost:3000/api/v1/destinations/dest-uuid', 'DELETE'],
+    ]);
+  });
+
+  it('executes application and service scheduled tasks immediately', async () => {
+    mockFetch
+      .mockResolvedValueOnce(mockResponse({ message: 'queued' }))
+      .mockResolvedValueOnce(mockResponse({ message: 'queued' }));
+
+    await client.executeApplicationScheduledTask('app-uuid', 'task-uuid');
+    await client.executeServiceScheduledTask('svc-uuid', 'task-uuid');
+
+    expect(mockFetch).toHaveBeenNthCalledWith(
+      1,
+      'http://localhost:3000/api/v1/applications/app-uuid/scheduled-tasks/task-uuid/execute',
+      expect.objectContaining({ method: 'POST' }),
+    );
+    expect(mockFetch).toHaveBeenNthCalledWith(
+      2,
+      'http://localhost:3000/api/v1/services/svc-uuid/scheduled-tasks/task-uuid/execute',
+      expect.objectContaining({ method: 'POST' }),
+    );
+  });
+});

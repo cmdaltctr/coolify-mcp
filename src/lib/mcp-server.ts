@@ -13,6 +13,8 @@ import type { ZodRawShapeCompat } from '@modelcontextprotocol/sdk/server/zod-com
 import { z } from 'zod';
 import {
   CoolifyClient,
+  CoolifyApiError,
+  isRoutingCatchAll,
   isRunningStatus,
   type ServerSummary,
   type ProjectSummary,
@@ -23,6 +25,8 @@ import {
 } from './coolify-client.js';
 import type {
   Application,
+  Database,
+  Service,
   CoolifyConfig,
   GitHubApp,
   BuildPack,
@@ -33,6 +37,11 @@ import type {
   DeploymentEssential,
   DeployTriggerResponse,
   UpdateServiceApplicationRequest,
+  CloneResource,
+  ClonedResourceSummary,
+  SharedEnvironmentVariable,
+  CreateSharedEnvRequest,
+  UpdateSharedEnvRequest,
 } from '../types/coolify.js';
 import { DocsSearchEngine } from './docs-search.js';
 import { confirmDestructive, describeBlastRadius, sanitizeForPrompt } from './elicit.js';
@@ -487,9 +496,12 @@ export const TOOL_ANNOTATIONS = {
   application: DESTRUCTIVE,
   database: DESTRUCTIVE,
   service: DESTRUCTIVE,
+  clone: DESTRUCTIVE,
   projects: DESTRUCTIVE,
   environments: DESTRUCTIVE,
   env_vars: DESTRUCTIVE,
+  shared_env: DESTRUCTIVE,
+  destinations: DESTRUCTIVE,
   private_keys: DESTRUCTIVE,
   github_apps: DESTRUCTIVE,
   cloud_tokens: DESTRUCTIVE,
@@ -845,6 +857,62 @@ export class CoolifyMcpServer extends McpServer {
       'Validate server connection',
       { uuid: z.string() },
       async ({ uuid }) => wrap(() => this.client.validateServer(uuid)),
+    );
+
+    // =========================================================================
+    // Docker Destinations (1 tool - consolidated CRUD)
+    // =========================================================================
+    this.defineTool(
+      'destinations',
+      'Manage Coolify Docker network destinations: list/get/create/update/delete. list may be narrowed to one server; create is always server-scoped. This is destination placement support, not a generic networking subsystem.',
+      {
+        action: z.enum(['list', 'get', 'create', 'update', 'delete']),
+        uuid: z.string().optional(),
+        server_uuid: z.string().optional(),
+        name: z.string().max(255).optional(),
+        network: z
+          .string()
+          .max(255)
+          .regex(
+            /^[a-zA-Z0-9][a-zA-Z0-9._-]*$/,
+            'network must start with an alphanumeric character and contain only letters, numbers, dot, underscore, or hyphen',
+          )
+          .optional(),
+        type: z.enum(['standalone', 'swarm']).optional(),
+      },
+      async ({ action, uuid, server_uuid, name, network, type }) => {
+        switch (action) {
+          case 'list':
+            return wrap(() => this.client.listDestinations(server_uuid));
+          case 'get':
+            if (!uuid)
+              return { content: [{ type: 'text' as const, text: 'Error: uuid required' }] };
+            return wrap(() => this.client.getDestination(uuid));
+          case 'create':
+            if (!server_uuid || !network) {
+              return {
+                content: [{ type: 'text' as const, text: 'Error: server_uuid, network required' }],
+              };
+            }
+            return wrapWithActions(
+              () => this.client.createDestination(server_uuid, { name, network, type }),
+              (result) => [
+                { tool: 'destinations', args: { action: 'get', uuid: result.uuid }, hint: 'View' },
+              ],
+            );
+          case 'update':
+            if (!uuid || !name) {
+              return {
+                content: [{ type: 'text' as const, text: 'Error: uuid, name required' }],
+              };
+            }
+            return wrap(() => this.client.updateDestination(uuid, { name }));
+          case 'delete':
+            if (!uuid)
+              return { content: [{ type: 'text' as const, text: 'Error: uuid required' }] };
+            return wrap(() => this.client.deleteDestination(uuid));
+        }
+      },
     );
 
     // =========================================================================
@@ -1750,6 +1818,98 @@ export class CoolifyMcpServer extends McpServer {
     );
 
     // =========================================================================
+    // Resource Clone (1 tool - consolidated for app/database/service)
+    // =========================================================================
+    this.defineTool(
+      'clone',
+      'Clone an existing application, database, or service into a Coolify destination. Volume data is not copied unless clone_volumes=true. Returns the new UUID and a compact resource projection with next actions.',
+      {
+        resource: z.enum(['application', 'database', 'service']),
+        uuid: z.string().describe('UUID of the source resource'),
+        destination_uuid: z.string().describe('Destination UUID for the clone'),
+        name: z.string().optional().describe('Optional name for the cloned resource'),
+        clone_volumes: z
+          .boolean()
+          .optional()
+          .describe('Copy persistent volume data (default false; may briefly stop the source)'),
+      },
+      async ({ resource, uuid, destination_uuid, name, clone_volumes }) => {
+        const data = { destination_uuid, name, clone_volumes };
+        return wrapWithActions(
+          async (): Promise<ClonedResourceSummary> => {
+            const cloned =
+              resource === 'application'
+                ? await this.client.cloneApplication(uuid, data)
+                : resource === 'database'
+                  ? await this.client.cloneDatabase(uuid, data)
+                  : await this.client.cloneService(uuid, data);
+
+            let created: Application | Database | Service | undefined;
+            let lookupWarning: string | undefined;
+            try {
+              created =
+                resource === 'application'
+                  ? await this.client.getApplication(cloned.uuid)
+                  : resource === 'database'
+                    ? await this.client.getDatabase(cloned.uuid)
+                    : await this.client.getService(cloned.uuid);
+            } catch (error) {
+              lookupWarning =
+                'Clone succeeded, but its detail lookup failed: ' +
+                (error instanceof Error ? error.message : String(error));
+            }
+
+            return {
+              uuid: cloned.uuid,
+              name: created?.name ?? name ?? cloned.uuid,
+              resource: resource as CloneResource,
+              destination_uuid,
+              project_uuid: created?.project_uuid,
+              environment_id: created?.environment_id,
+              environment_uuid: created?.environment_uuid,
+              environment_name:
+                'environment_name' in (created ?? {})
+                  ? (created as Database | Service).environment_name
+                  : undefined,
+              message: cloned.message,
+              lookup_warning: lookupWarning,
+            };
+          },
+          (result): ResponseAction[] => {
+            const getTool =
+              result.resource === 'application'
+                ? 'get_application'
+                : result.resource === 'database'
+                  ? 'get_database'
+                  : 'get_service';
+            const actions: ResponseAction[] = [
+              { tool: getTool, args: { uuid: result.uuid }, hint: 'View clone' },
+              {
+                tool: 'env_vars',
+                args: { resource: result.resource, action: 'list', uuid: result.uuid },
+                hint: 'Inspect env vars',
+              },
+            ];
+            if (result.resource === 'application') {
+              actions.push({
+                tool: 'deploy',
+                args: { tag_or_uuid: result.uuid },
+                hint: 'Deploy clone',
+              });
+            } else {
+              actions.push({
+                tool: 'control',
+                args: { resource: result.resource, action: 'start', uuid: result.uuid },
+                hint: 'Start clone',
+              });
+            }
+            return actions;
+          },
+        );
+      },
+    );
+
+    // =========================================================================
     // Resource Control (1 tool - start/stop/restart for all types)
     // =========================================================================
     this.defineTool(
@@ -1993,6 +2153,171 @@ export class CoolifyMcpServer extends McpServer {
     );
 
     // =========================================================================
+    // Shared Environment Variables (1 tool - team/project/environment/server)
+    // =========================================================================
+    this.defineTool(
+      'shared_env',
+      "Manage inherited Coolify environment variables at team, project, environment, or server scope. This is separate from resource-specific env_vars. Values are masked as '***' unless reveal=true; use key or get with reveal to minimise secret exposure. Upstream has no single-item read route, so get performs a scoped list lookup by env_id.",
+      {
+        scope: z.enum(['team', 'project', 'environment', 'server']),
+        action: z.enum(['list', 'get', 'create', 'update', 'delete']),
+        env_id: z.number().int().positive().optional(),
+        project_uuid: z.string().optional(),
+        environment_name_or_uuid: z.string().optional(),
+        server_uuid: z.string().optional(),
+        key: z.string().optional(),
+        value: z.string().nullable().optional(),
+        is_literal: z.boolean().optional(),
+        is_multiline: z.boolean().optional(),
+        is_shown_once: z.boolean().optional(),
+        comment: z.string().max(256).nullable().optional(),
+        reveal: z.boolean().optional(),
+      },
+      async (args) => {
+        const {
+          scope,
+          action,
+          env_id,
+          project_uuid,
+          environment_name_or_uuid,
+          server_uuid,
+          reveal,
+        } = args;
+
+        if ((scope === 'project' || scope === 'environment') && !project_uuid) {
+          return {
+            content: [{ type: 'text' as const, text: 'Error: project_uuid required for scope' }],
+          };
+        }
+        if (scope === 'environment' && !environment_name_or_uuid) {
+          return {
+            content: [
+              {
+                type: 'text' as const,
+                text: 'Error: environment_name_or_uuid required for environment scope',
+              },
+            ],
+          };
+        }
+        if (scope === 'server' && !server_uuid) {
+          return {
+            content: [{ type: 'text' as const, text: 'Error: server_uuid required for scope' }],
+          };
+        }
+        if ((action === 'get' || action === 'update' || action === 'delete') && !env_id) {
+          return { content: [{ type: 'text' as const, text: 'Error: env_id required' }] };
+        }
+
+        const list = async (): Promise<SharedEnvironmentVariable[]> => {
+          const variables =
+            scope === 'team'
+              ? await this.client.listTeamSharedEnvVars({ reveal })
+              : scope === 'project'
+                ? await this.client.listProjectSharedEnvVars(project_uuid!, { reveal })
+                : scope === 'environment'
+                  ? await this.client.listEnvironmentSharedEnvVars(
+                      project_uuid!,
+                      environment_name_or_uuid!,
+                      { reveal },
+                    )
+                  : await this.client.listServerSharedEnvVars(server_uuid!, { reveal });
+          return args.key ? variables.filter((variable) => variable.key === args.key) : variables;
+        };
+
+        const createData: CreateSharedEnvRequest = {
+          key: args.key ?? '',
+          value: args.value,
+          is_literal: args.is_literal,
+          is_multiline: args.is_multiline,
+          is_shown_once: args.is_shown_once,
+          comment: args.comment,
+        };
+        const updateData: UpdateSharedEnvRequest = {
+          key: args.key,
+          value: args.value,
+          is_literal: args.is_literal,
+          is_multiline: args.is_multiline,
+          is_shown_once: args.is_shown_once,
+          comment: args.comment,
+        };
+
+        switch (action) {
+          case 'list':
+            return wrap(list);
+          case 'get':
+            return wrap(async () => {
+              const variable = (await list()).find((candidate) => candidate.id === env_id);
+              if (!variable) {
+                throw new Error(
+                  `Shared environment variable ${env_id} not found in ${scope} scope`,
+                );
+              }
+              return variable;
+            });
+          case 'create':
+            if (!args.key) {
+              return { content: [{ type: 'text' as const, text: 'Error: key required' }] };
+            }
+            return wrap(() =>
+              scope === 'team'
+                ? this.client.createTeamSharedEnvVar(createData)
+                : scope === 'project'
+                  ? this.client.createProjectSharedEnvVar(project_uuid!, createData)
+                  : scope === 'environment'
+                    ? this.client.createEnvironmentSharedEnvVar(
+                        project_uuid!,
+                        environment_name_or_uuid!,
+                        createData,
+                      )
+                    : this.client.createServerSharedEnvVar(server_uuid!, createData),
+            );
+          case 'update': {
+            if (!Object.values(updateData).some((value) => value !== undefined)) {
+              return {
+                content: [
+                  { type: 'text' as const, text: 'Error: at least one update field required' },
+                ],
+              };
+            }
+            return wrap(() =>
+              scope === 'team'
+                ? this.client.updateTeamSharedEnvVar(env_id!, updateData, { reveal })
+                : scope === 'project'
+                  ? this.client.updateProjectSharedEnvVar(project_uuid!, env_id!, updateData, {
+                      reveal,
+                    })
+                  : scope === 'environment'
+                    ? this.client.updateEnvironmentSharedEnvVar(
+                        project_uuid!,
+                        environment_name_or_uuid!,
+                        env_id!,
+                        updateData,
+                        { reveal },
+                      )
+                    : this.client.updateServerSharedEnvVar(server_uuid!, env_id!, updateData, {
+                        reveal,
+                      }),
+            );
+          }
+          case 'delete':
+            return wrap(() =>
+              scope === 'team'
+                ? this.client.deleteTeamSharedEnvVar(env_id!)
+                : scope === 'project'
+                  ? this.client.deleteProjectSharedEnvVar(project_uuid!, env_id!)
+                  : scope === 'environment'
+                    ? this.client.deleteEnvironmentSharedEnvVar(
+                        project_uuid!,
+                        environment_name_or_uuid!,
+                        env_id!,
+                      )
+                    : this.client.deleteServerSharedEnvVar(server_uuid!, env_id!),
+            );
+        }
+      },
+    );
+
+    // =========================================================================
     // Deployments (3 tools)
     // =========================================================================
     this.defineTool(
@@ -2051,16 +2376,20 @@ export class CoolifyMcpServer extends McpServer {
 
     this.defineTool(
       'deployment',
-      'Manage deployment: get/cancel/list_for_app. Logs excluded by default on all actions — for get use `lines` (paginated tail), for list_for_app use `include_logs: true` to include raw build-log blobs.',
+      'Manage deployment: get/cancel/list_for_app/rollback_images/rollback. For rollback actions uuid is the application UUID; rollback requires a commit/tag returned by rollback_images. Logs are excluded by default — for get use lines (paginated tail), for list_for_app use include_logs=true.',
       {
-        action: z.enum(['get', 'cancel', 'list_for_app']),
+        action: z.enum(['get', 'cancel', 'list_for_app', 'rollback_images', 'rollback']),
         uuid: z.string(),
+        commit: z
+          .string()
+          .optional()
+          .describe('rollback only: image commit/tag from rollback_images'),
         lines: z.number().optional(), // Include logs truncated to last N entries (omit for no logs)
         page: z.number().optional(), // Log page (1=most recent, 2=older, etc.)
         max_chars: z.number().optional(), // Limit log output to last N chars (default: 50000)
         include_logs: z.boolean().optional(), // list_for_app only: include raw build logs (default false; upstream returns ~30KB per deployment)
       },
-      async ({ action, uuid, lines, page, max_chars, include_logs }) => {
+      async ({ action, uuid, commit, lines, page, max_chars, include_logs }) => {
         switch (action) {
           case 'get':
             // If lines param specified, include logs and truncate
@@ -2137,6 +2466,16 @@ export class CoolifyMcpServer extends McpServer {
                 ),
               };
             });
+          case 'rollback_images':
+            return wrap(() => this.client.listApplicationRollbackImages(uuid));
+          case 'rollback':
+            if (!commit) {
+              return { content: [{ type: 'text' as const, text: 'Error: commit required' }] };
+            }
+            return wrapWithActions(
+              () => this.client.rollbackApplication(uuid, { commit }),
+              (result) => getDeploymentActions(result.deployment_uuid, 'queued', uuid),
+            );
         }
       },
     );
@@ -2691,10 +3030,10 @@ export class CoolifyMcpServer extends McpServer {
       'scheduled_tasks',
       'Manage scheduled tasks for app or service: list/create/update/delete/list_executions/run_once. ' +
         "list_executions: the command's stdout comes back in the execution's message field. " +
-        'run_once: composite that creates a throwaway "* * * * *" task, polls list_executions every ~5s ' +
-        'for the first terminal execution (or until wait_seconds elapses, default 90), deletes the task, ' +
-        'and returns status+message. WARNING: the underlying cron may fire more than once before cleanup ' +
-        'completes — make the command idempotent (e.g. `where not exists`) or tolerate re-execution. ' +
+        'run_once: composite that creates a disabled throwaway task, asks current Coolify to execute it immediately, ' +
+        'polls list_executions every ~5s for a terminal result, then deletes the task. Older Coolify versions ' +
+        'without the execute route fall back to enabling the existing "* * * * *" cron flow; in fallback mode ' +
+        'the command may fire more than once before cleanup, so make it idempotent or tolerate re-execution. ' +
         'Coolify stores `command` in a varchar(255) column and rejects longer commands with a bodyless ' +
         'HTTP 500 — keep commands to 255 chars or fewer (#234).',
       {
@@ -3225,10 +3564,11 @@ export class CoolifyMcpServer extends McpServer {
   }
 
   /**
-   * Composite one-off command execution (#233 / #208): there is no upstream
-   * "run now" endpoint for scheduled tasks, so this creates a throwaway
-   * `* * * * *` task, polls list_executions until the first execution reaches a
-   * terminal status (or the poll budget runs out), and returns its status+message.
+   * Composite one-off command execution (#233 / #208). Current Coolify exposes
+   * a native scheduled-task execute endpoint, so a disabled throwaway task can
+   * be dispatched immediately without waiting for cron. A routing-catch-all 404
+   * identifies older Coolify versions; only then do we enable the same task and
+   * retain the previous `* * * * *` cron fallback.
    *
    * The task is deleted in a finally-equivalent (try/finally-style) block so cleanup
    * always runs — on success, on timeout, and on a polling error. If cleanup itself
@@ -3258,7 +3598,7 @@ export class CoolifyMcpServer extends McpServer {
             frequency: '* * * * *',
             container,
             timeout,
-            enabled: true,
+            enabled: false,
           })
         : await this.client.createServiceScheduledTask(uuid, {
             name,
@@ -3266,7 +3606,7 @@ export class CoolifyMcpServer extends McpServer {
             frequency: '* * * * *',
             container,
             timeout,
-            enabled: true,
+            enabled: false,
           });
       taskUuid = task.uuid;
     } catch (error) {
@@ -3280,23 +3620,53 @@ export class CoolifyMcpServer extends McpServer {
       };
     }
 
+    let executionMode: 'native' | 'cron_fallback' = 'native';
+    let executionSetupErrorMessage: string | undefined;
+    try {
+      if (isApp) {
+        await this.client.executeApplicationScheduledTask(uuid, taskUuid);
+      } else {
+        await this.client.executeServiceScheduledTask(uuid, taskUuid);
+      }
+    } catch (error) {
+      if (error instanceof CoolifyApiError && isRoutingCatchAll(error)) {
+        executionMode = 'cron_fallback';
+        try {
+          if (isApp) {
+            await this.client.updateApplicationScheduledTask(uuid, taskUuid, { enabled: true });
+          } else {
+            await this.client.updateServiceScheduledTask(uuid, taskUuid, { enabled: true });
+          }
+        } catch (fallbackError) {
+          executionSetupErrorMessage =
+            'native execute is unavailable and enabling the cron fallback failed: ' +
+            (fallbackError instanceof Error ? fallbackError.message : String(fallbackError));
+        }
+      } else {
+        executionSetupErrorMessage =
+          'native execute failed: ' + (error instanceof Error ? error.message : String(error));
+      }
+    }
+
     let execution: ScheduledTaskExecution | undefined;
     let pollErrorMessage: string | undefined;
 
-    try {
-      for (let attempt = 0; attempt < maxAttempts; attempt++) {
-        const executions = isApp
-          ? await this.client.listApplicationScheduledTaskExecutions(uuid, taskUuid)
-          : await this.client.listServiceScheduledTaskExecutions(uuid, taskUuid);
-        const first = executions[0];
-        if (first && first.status !== 'running') {
-          execution = first;
-          break;
+    if (!executionSetupErrorMessage) {
+      try {
+        for (let attempt = 0; attempt < maxAttempts; attempt++) {
+          const executions = isApp
+            ? await this.client.listApplicationScheduledTaskExecutions(uuid, taskUuid)
+            : await this.client.listServiceScheduledTaskExecutions(uuid, taskUuid);
+          const first = executions[0];
+          if (first && first.status !== 'running') {
+            execution = first;
+            break;
+          }
+          if (attempt < maxAttempts - 1) await this.sleep(pollIntervalMs);
         }
-        if (attempt < maxAttempts - 1) await this.sleep(pollIntervalMs);
+      } catch (error) {
+        pollErrorMessage = error instanceof Error ? error.message : String(error);
       }
-    } catch (error) {
-      pollErrorMessage = error instanceof Error ? error.message : String(error);
     }
 
     // Cleanup always runs, regardless of how the poll loop above ended.
@@ -3315,6 +3685,17 @@ export class CoolifyMcpServer extends McpServer {
       ? `WARNING: failed to delete one-off task ${taskUuid} — it will keep firing every minute ` +
         `until it is removed manually. Delete error: ${deleteErrorMessage}`
       : `One-off task ${taskUuid} deleted.`;
+
+    if (executionSetupErrorMessage) {
+      return {
+        content: [
+          {
+            type: 'text' as const,
+            text: `Error starting one-off task ${taskUuid}: ${executionSetupErrorMessage}. ${cleanupNote}`,
+          },
+        ],
+      };
+    }
 
     if (pollErrorMessage) {
       return {
@@ -3347,6 +3728,7 @@ export class CoolifyMcpServer extends McpServer {
           text: JSON.stringify(
             {
               status: execution.status,
+              execution_mode: executionMode,
               // Raw command stdout from inside the container (FINDINGS #4).
               message:
                 typeof execution.message === 'string'

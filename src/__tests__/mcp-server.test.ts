@@ -20,6 +20,7 @@ import {
   getDeploymentActions,
   getPagination,
 } from '../lib/mcp-server.js';
+import { CoolifyApiError } from '../lib/coolify-client.js';
 
 describe('CoolifyMcpServer v2', () => {
   let server: CoolifyMcpServer;
@@ -1371,6 +1372,12 @@ describe('CoolifyMcpServer v2', () => {
       // directly so tests are instant (jest.spyOn's generic inference struggles
       // with private methods here, so a plain shadowing assignment is simpler).
       (server as unknown as ServerWithSleep).sleep = (): Promise<void> => Promise.resolve();
+      jest
+        .spyOn(server['client'], 'executeApplicationScheduledTask')
+        .mockResolvedValue({ message: 'queued' });
+      jest
+        .spyOn(server['client'], 'executeServiceScheduledTask')
+        .mockResolvedValue({ message: 'queued' });
     });
 
     it('validates command and container are required', async () => {
@@ -1411,7 +1418,7 @@ describe('CoolifyMcpServer v2', () => {
           command: 'php artisan migrate',
           frequency: '* * * * *',
           container: 'app',
-          enabled: true,
+          enabled: false,
         }),
       );
       expect(listSpy).toHaveBeenCalledTimes(2);
@@ -1420,17 +1427,73 @@ describe('CoolifyMcpServer v2', () => {
 
       const parsed = JSON.parse(result.content[0]!.text) as {
         status: string;
+        execution_mode: string;
         message: string;
         task_uuid: string;
         cleanup: string;
       };
       expect(parsed.status).toBe('success');
+      expect(parsed.execution_mode).toBe('native');
       // Command stdout is attacker-influenceable — framed as untrusted data
       // (evals/FINDINGS.md #4), so the original output rides inside the boundary.
       expect(parsed.message).toContain('Migrated: 2026_01_01_000000_add_col');
       expect(parsed.message).toContain('BEGIN UNTRUSTED LOG OUTPUT');
       expect(parsed.task_uuid).toBe('task-uuid');
       expect(parsed.cleanup).toContain('deleted');
+    });
+
+    it('falls back to cron only when the native execute route is absent', async () => {
+      jest.spyOn(server['client'], 'createApplicationScheduledTask').mockResolvedValue(mockTask);
+      jest.spyOn(server['client'], 'executeApplicationScheduledTask').mockRejectedValueOnce(
+        new CoolifyApiError('HTTP 404: Not found.', 404, {
+          message: 'Not found.',
+          docs: 'https://coolify.io/docs',
+        }),
+      );
+      const updateSpy = jest
+        .spyOn(server['client'], 'updateApplicationScheduledTask')
+        .mockResolvedValue(mockTask);
+      jest.spyOn(server['client'], 'listApplicationScheduledTaskExecutions').mockResolvedValue([
+        {
+          uuid: 'exec-uuid',
+          status: 'success',
+          message: 'ok',
+          retry_count: 0,
+          created_at: '',
+          updated_at: '',
+        },
+      ]);
+      jest
+        .spyOn(server['client'], 'deleteApplicationScheduledTask')
+        .mockResolvedValue({ message: 'deleted' });
+
+      const result = await callScheduledTasks(server, baseArgs);
+
+      expect(updateSpy).toHaveBeenCalledWith('app-uuid', 'task-uuid', { enabled: true });
+      const parsed = JSON.parse(result.content[0]!.text) as { execution_mode: string };
+      expect(parsed.execution_mode).toBe('cron_fallback');
+    });
+
+    it('does not treat a controller 404 as an old-Coolify route fallback', async () => {
+      jest.spyOn(server['client'], 'createApplicationScheduledTask').mockResolvedValue(mockTask);
+      jest.spyOn(server['client'], 'executeApplicationScheduledTask').mockRejectedValueOnce(
+        new CoolifyApiError('HTTP 404: Scheduled task not found.', 404, {
+          message: 'Scheduled task not found.',
+        }),
+      );
+      const updateSpy = jest.spyOn(server['client'], 'updateApplicationScheduledTask');
+      const listSpy = jest.spyOn(server['client'], 'listApplicationScheduledTaskExecutions');
+      const deleteSpy = jest
+        .spyOn(server['client'], 'deleteApplicationScheduledTask')
+        .mockResolvedValue({ message: 'deleted' });
+
+      const result = await callScheduledTasks(server, baseArgs);
+
+      expect(updateSpy).not.toHaveBeenCalled();
+      expect(listSpy).not.toHaveBeenCalled();
+      expect(deleteSpy).toHaveBeenCalledWith('app-uuid', 'task-uuid');
+      expect(result.content[0]!.text).toContain('native execute failed');
+      expect(result.content[0]!.text).toContain('deleted');
     });
 
     it('times out when no execution ever appears, and still deletes the task', async () => {
@@ -1918,12 +1981,14 @@ describe('tool annotations (#260)', () => {
       [
         'application',
         'bulk_env_update',
+        'clone',
         'cloud_tokens',
         'control',
         'database',
         'database_backups',
         'deploy',
         'deployment',
+        'destinations',
         'env_vars',
         'environments',
         'github_apps',
@@ -1933,6 +1998,7 @@ describe('tool annotations (#260)', () => {
         'restart_project_apps',
         'scheduled_tasks',
         'service',
+        'shared_env',
         'stop_all_apps',
         'storages',
         'system',
@@ -2614,6 +2680,270 @@ describe('service sub-application actions (#322)', () => {
 
       expect(spy).toHaveBeenCalledWith('svc-uuid', 'app-uuid');
     });
+  });
+});
+
+describe('dev-agent MCP tool handlers', () => {
+  type ToolResult = { content: Array<{ text: string }> };
+  type RegisteredTool = {
+    inputSchema: { safeParse: (args: unknown) => { success: boolean; error?: unknown } };
+    handler: (args: Record<string, unknown>, extra: unknown) => Promise<unknown>;
+  };
+
+  let server: CoolifyMcpServer;
+
+  beforeEach(() => {
+    server = new CoolifyMcpServer({
+      baseUrl: 'http://localhost:3000',
+      accessToken: 'test-token',
+    });
+  });
+
+  const getTool = (name: string): RegisteredTool =>
+    (
+      server as unknown as {
+        _registeredTools: Record<string, RegisteredTool>;
+      }
+    )._registeredTools[name]!;
+
+  const callTool = (name: string, args: Record<string, unknown>): Promise<ToolResult> =>
+    getTool(name).handler(args, {}) as Promise<ToolResult>;
+
+  it('clones an application, projects the new resource, and suggests next actions', async () => {
+    jest
+      .spyOn(server['client'], 'cloneApplication')
+      .mockResolvedValue({ uuid: 'new-app', message: 'Application cloned.' });
+    jest.spyOn(server['client'], 'getApplication').mockResolvedValue({
+      id: 2,
+      uuid: 'new-app',
+      name: 'preview-app',
+      project_uuid: 'project-uuid',
+      environment_uuid: 'environment-uuid',
+      environment_id: 3,
+      created_at: '',
+      updated_at: '',
+    });
+
+    const result = await callTool('clone', {
+      resource: 'application',
+      uuid: 'source-app',
+      destination_uuid: 'destination-uuid',
+      name: 'preview-app',
+    });
+    const parsed = JSON.parse(result.content[0]!.text) as {
+      data: Record<string, unknown>;
+      _actions: Array<{ tool: string; args: Record<string, unknown> }>;
+    };
+
+    expect(parsed.data).toMatchObject({
+      uuid: 'new-app',
+      name: 'preview-app',
+      resource: 'application',
+      destination_uuid: 'destination-uuid',
+      project_uuid: 'project-uuid',
+    });
+    expect(parsed._actions).toContainEqual(
+      expect.objectContaining({ tool: 'deploy', args: { tag_or_uuid: 'new-app' } }),
+    );
+    expect(parsed._actions).toContainEqual(
+      expect.objectContaining({
+        tool: 'env_vars',
+        args: { resource: 'application', action: 'list', uuid: 'new-app' },
+      }),
+    );
+  });
+
+  it('keeps a successful clone usable when the follow-up detail lookup fails', async () => {
+    jest.spyOn(server['client'], 'cloneDatabase').mockResolvedValue({ uuid: 'new-db' });
+    jest.spyOn(server['client'], 'getDatabase').mockRejectedValue(new Error('temporary 503'));
+
+    const result = await callTool('clone', {
+      resource: 'database',
+      uuid: 'source-db',
+      destination_uuid: 'destination-uuid',
+      name: 'preview-db',
+    });
+    const parsed = JSON.parse(result.content[0]!.text) as { data: Record<string, unknown> };
+
+    expect(parsed.data).toMatchObject({ uuid: 'new-db', name: 'preview-db' });
+    expect(parsed.data.lookup_warning).toContain('temporary 503');
+  });
+
+  it('returns clone API failures and validates required parameters locally', async () => {
+    jest.spyOn(server['client'], 'cloneService').mockRejectedValue(new Error('HTTP 422: invalid'));
+
+    const failed = await callTool('clone', {
+      resource: 'service',
+      uuid: 'source-service',
+      destination_uuid: 'destination-uuid',
+    });
+    expect(failed.content[0]!.text).toContain('HTTP 422');
+
+    expect(
+      getTool('clone').inputSchema.safeParse({ resource: 'service', uuid: 'source' }).success,
+    ).toBe(false);
+  });
+
+  it('lists rollback targets and queues rollback through deployment', async () => {
+    const targets = {
+      current: 'new-commit',
+      images: [{ tag: 'old-commit', created_at: '2026-08-01', is_current: false }],
+    };
+    jest.spyOn(server['client'], 'listApplicationRollbackImages').mockResolvedValue(targets);
+    jest
+      .spyOn(server['client'], 'rollbackApplication')
+      .mockResolvedValue({ message: 'queued', deployment_uuid: 'dep-uuid' });
+
+    const listed = await callTool('deployment', {
+      action: 'rollback_images',
+      uuid: 'app-uuid',
+    });
+    expect(JSON.parse(listed.content[0]!.text)).toEqual(targets);
+
+    const rolledBack = await callTool('deployment', {
+      action: 'rollback',
+      uuid: 'app-uuid',
+      commit: 'old-commit',
+    });
+    const parsed = JSON.parse(rolledBack.content[0]!.text) as {
+      data: { deployment_uuid: string };
+      _actions: Array<{ tool: string; args: Record<string, unknown> }>;
+    };
+    expect(parsed.data.deployment_uuid).toBe('dep-uuid');
+    expect(parsed._actions).toContainEqual(
+      expect.objectContaining({ tool: 'deployment', args: { action: 'cancel', uuid: 'dep-uuid' } }),
+    );
+
+    const missingCommit = await callTool('deployment', { action: 'rollback', uuid: 'app-uuid' });
+    expect(missingCommit.content[0]!.text).toBe('Error: commit required');
+  });
+
+  it('routes shared environment actions to the requested scope', async () => {
+    const variable = {
+      id: 7,
+      key: 'API_TOKEN',
+      value: '***',
+      is_literal: false,
+      is_multiline: false,
+      is_shown_once: false,
+    };
+    const listTeam = jest
+      .spyOn(server['client'], 'listTeamSharedEnvVars')
+      .mockResolvedValue([variable]);
+    const listEnvironment = jest
+      .spyOn(server['client'], 'listEnvironmentSharedEnvVars')
+      .mockResolvedValue([variable]);
+    const createProject = jest
+      .spyOn(server['client'], 'createProjectSharedEnvVar')
+      .mockResolvedValue({ id: 8 });
+    const updateServer = jest
+      .spyOn(server['client'], 'updateServerSharedEnvVar')
+      .mockResolvedValue(variable);
+
+    await callTool('shared_env', { scope: 'team', action: 'list', key: 'API_TOKEN' });
+    await callTool('shared_env', {
+      scope: 'environment',
+      action: 'get',
+      env_id: 7,
+      project_uuid: 'project-uuid',
+      environment_name_or_uuid: 'preview',
+    });
+    await callTool('shared_env', {
+      scope: 'project',
+      action: 'create',
+      project_uuid: 'project-uuid',
+      key: 'API_TOKEN',
+      value: 'secret',
+    });
+    await callTool('shared_env', {
+      scope: 'server',
+      action: 'update',
+      server_uuid: 'server-uuid',
+      env_id: 7,
+      comment: 'rotated',
+    });
+
+    expect(listTeam).toHaveBeenCalledWith({ reveal: undefined });
+    expect(listEnvironment).toHaveBeenCalledWith('project-uuid', 'preview', {
+      reveal: undefined,
+    });
+    expect(createProject).toHaveBeenCalledWith(
+      'project-uuid',
+      expect.objectContaining({ key: 'API_TOKEN', value: 'secret' }),
+    );
+    expect(updateServer).toHaveBeenCalledWith(
+      'server-uuid',
+      7,
+      expect.objectContaining({ comment: 'rotated' }),
+      { reveal: undefined },
+    );
+  });
+
+  it('validates shared environment scope targets and missing scoped records', async () => {
+    const missingTarget = await callTool('shared_env', {
+      scope: 'environment',
+      action: 'list',
+    });
+    expect(missingTarget.content[0]!.text).toContain('project_uuid required');
+
+    jest.spyOn(server['client'], 'listTeamSharedEnvVars').mockResolvedValue([]);
+    const missingRecord = await callTool('shared_env', {
+      scope: 'team',
+      action: 'get',
+      env_id: 99,
+    });
+    expect(missingRecord.content[0]!.text).toContain('not found');
+  });
+
+  it('provides consolidated destination CRUD with local validation', async () => {
+    const destination = {
+      uuid: 'dest-uuid',
+      name: 'preview',
+      network: 'preview-net',
+      type: 'standalone' as const,
+      server_uuid: 'server-uuid',
+    };
+    const list = jest.spyOn(server['client'], 'listDestinations').mockResolvedValue([destination]);
+    const create = jest.spyOn(server['client'], 'createDestination').mockResolvedValue(destination);
+    const remove = jest
+      .spyOn(server['client'], 'deleteDestination')
+      .mockResolvedValue({ message: 'deleted' });
+
+    await callTool('destinations', {
+      action: 'list',
+      server_uuid: 'server-uuid',
+    });
+    const created = await callTool('destinations', {
+      action: 'create',
+      server_uuid: 'server-uuid',
+      network: 'preview-net',
+      name: 'preview',
+    });
+    await callTool('destinations', { action: 'delete', uuid: 'dest-uuid' });
+
+    expect(list).toHaveBeenCalledWith('server-uuid');
+    expect(create).toHaveBeenCalledWith('server-uuid', {
+      name: 'preview',
+      network: 'preview-net',
+      type: undefined,
+    });
+    expect(remove).toHaveBeenCalledWith('dest-uuid');
+    expect(JSON.parse(created.content[0]!.text)._actions).toContainEqual(
+      expect.objectContaining({ tool: 'destinations' }),
+    );
+
+    const invalid = getTool('destinations').inputSchema.safeParse({
+      action: 'create',
+      server_uuid: 'server-uuid',
+      network: 'bad network',
+    });
+    expect(invalid.success).toBe(false);
+
+    const missing = await callTool('destinations', {
+      action: 'create',
+      server_uuid: 'server-uuid',
+    });
+    expect(missing.content[0]!.text).toContain('network required');
   });
 });
 

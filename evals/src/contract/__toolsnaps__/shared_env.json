@@ -1,0 +1,86 @@
+{
+  "name": "shared_env",
+  "description": "Manage inherited Coolify environment variables at team, project, environment, or server scope. This is separate from resource-specific env_vars. Values are masked as '***' unless reveal=true; use key or get with reveal to minimise secret exposure. Upstream has no single-item read route, so get performs a scoped list lookup by env_id.",
+  "annotations": {
+    "destructiveHint": true
+  },
+  "inputSchema": {
+    "type": "object",
+    "properties": {
+      "scope": {
+        "type": "string",
+        "enum": [
+          "team",
+          "project",
+          "environment",
+          "server"
+        ]
+      },
+      "action": {
+        "type": "string",
+        "enum": [
+          "list",
+          "get",
+          "create",
+          "update",
+          "delete"
+        ]
+      },
+      "env_id": {
+        "type": "integer",
+        "exclusiveMinimum": 0,
+        "maximum": 9007199254740991
+      },
+      "project_uuid": {
+        "type": "string"
+      },
+      "environment_name_or_uuid": {
+        "type": "string"
+      },
+      "server_uuid": {
+        "type": "string"
+      },
+      "key": {
+        "type": "string"
+      },
+      "value": {
+        "anyOf": [
+          {
+            "type": "string"
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "is_literal": {
+        "type": "boolean"
+      },
+      "is_multiline": {
+        "type": "boolean"
+      },
+      "is_shown_once": {
+        "type": "boolean"
+      },
+      "comment": {
+        "anyOf": [
+          {
+            "type": "string",
+            "maxLength": 256
+          },
+          {
+            "type": "null"
+          }
+        ]
+      },
+      "reveal": {
+        "type": "boolean"
+      }
+    },
+    "required": [
+      "scope",
+      "action"
+    ],
+    "$schema": "http://json-schema.org/draft-07/schema#"
+  }
+}
