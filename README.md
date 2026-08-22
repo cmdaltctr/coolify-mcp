@@ -28,6 +28,23 @@ claude mcp add coolify \
   -- npx @masonator/coolify-mcp@latest
 ```
 
+**OpenCode** (add to `opencode.json` in your project root or `~/.config/opencode/.opencode/opencode.json`):
+
+```json
+{
+  "mcp": {
+    "coolify": {
+      "type": "local",
+      "command": ["npx", "-y", "@masonator/coolify-mcp@latest"],
+      "environment": {
+        "COOLIFY_BASE_URL": "https://your-coolify-instance.com",
+        "COOLIFY_ACCESS_TOKEN": "your-api-token"
+      }
+    }
+  }
+}
+```
+
 **Any MCP client (JSON config):**
 
 ```json
