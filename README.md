@@ -19,13 +19,20 @@ You need a running Coolify v4 instance and an API token (Coolify → Settings �
 
 **Claude Desktop, one-click:** download [`coolify-mcp.mcpb`](https://github.com/StuMason/coolify-mcp/releases/latest/download/coolify-mcp.mcpb) and drag it into **Settings → Extensions**. You'll be prompted for your Coolify URL and token. No Node install, no JSON editing.
 
+**From a local clone** (build first, then point your client at `dist/index.js`):
+
+```bash
+git clone https://github.com/cmdaltctr/coolify-mcp.git
+cd coolify-mcp && npm install && npm run build
+```
+
 **Claude Code:**
 
 ```bash
 claude mcp add coolify \
   -e COOLIFY_BASE_URL="https://your-coolify-instance.com" \
   -e COOLIFY_ACCESS_TOKEN="your-api-token" \
-  -- npx @masonator/coolify-mcp@latest
+  -- node /absolute/path/to/coolify-mcp/dist/index.js
 ```
 
 **OpenCode** (add to `opencode.json` in your project root or `~/.config/opencode/.opencode/opencode.json`):
@@ -35,7 +42,7 @@ claude mcp add coolify \
   "mcp": {
     "coolify": {
       "type": "local",
-      "command": ["npx", "-y", "@masonator/coolify-mcp@latest"],
+      "command": ["node", "/absolute/path/to/coolify-mcp/dist/index.js"],
       "environment": {
         "COOLIFY_BASE_URL": "https://your-coolify-instance.com",
         "COOLIFY_ACCESS_TOKEN": "your-api-token"
@@ -51,8 +58,8 @@ claude mcp add coolify \
 {
   "mcpServers": {
     "coolify": {
-      "command": "npx",
-      "args": ["-y", "@masonator/coolify-mcp"],
+      "command": "node",
+      "args": ["/absolute/path/to/coolify-mcp/dist/index.js"],
       "env": {
         "COOLIFY_BASE_URL": "https://your-coolify-instance.com",
         "COOLIFY_ACCESS_TOKEN": "your-api-token"
@@ -61,6 +68,8 @@ claude mcp add coolify \
   }
 }
 ```
+
+Prefer the published package instead? Replace the `node /absolute/path/to/coolify-mcp/dist/index.js` command with `npx -y @masonator/coolify-mcp@latest` (or `npx` + `["-y", "@masonator/coolify-mcp"]` for JSON configs) and drop the build step.
 
 Behind Cloudflare Access or an auth proxy? Add `--header "Key: Value"` args (repeatable). The same config works in Cursor, Claude Code and any other MCP client, and can be repeated for multiple Coolify instances.
 
